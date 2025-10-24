@@ -1,0 +1,11 @@
+- [x] Verify that the copilot-instructions.md file in the .github directory is created. (Copilot instructions file recreada tras scaffolding.)
+- [x] Clarify Project Requirements (Usuario solicitó web Next.js moderna con roles y módulos, soporte móvil.)
+- [x] Scaffold the Project (Next.js 14 TS app router con Tailwind generado con create-next-app.)
+- [x] Customize the Project (Pantallas de login y dashboard con control de roles, estilos responsive y placeholders Supabase.)
+- [x] Install Required Extensions (No se requieren extensiones adicionales para este entorno.)
+- [x] Compile the Project (npm run lint y npm run build ejecutados sin errores.)
+- [x] Create and Run Task (Se utilizarán scripts npm, no es necesario crear tasks adicionales.)
+- [x] Launch the Project (No se lanzó servidor; se espera confirmación del usuario para modo debug.)
+- [x] Ensure Documentation is Complete (README y copilot-instructions actualizados; comentarios eliminados.)
+- Keep comunicación concisa y enfocada.
+- Sigue buenas prácticas de desarrollo.
