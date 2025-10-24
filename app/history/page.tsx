@@ -8,6 +8,8 @@ import { useConfirm } from "@/components/confirm/provider";
 import { useNotify } from "@/components/notifications/provider";
 import { listOrders, listProducts, deleteOrder as deleteOrderRemote, clearOrders as clearOrdersRemote } from "@/lib/supabase-repo";
 import type { OrderItem as DbOrderItem } from "@/lib/supabase-repo";
+import { getTicketsConfigRemote } from "@/lib/supabase-repo";
+import { DEFAULT_TICKETS_CONFIG, type TicketsConfig } from "@/lib/settings";
 
 const PAYMENT_METHODS = SALES_ORDER_PAYMENT_METHODS;
 
@@ -205,6 +207,296 @@ export default function HistoryPage() {
     }
   };
 
+  // Ticket rendering (PNG) for both Ventas and Órdenes de Venta
+  const ticketDateFormatter = new Intl.DateTimeFormat("es-BO", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
+
+  const wrapText = (
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    font: string,
+    maxWidth: number,
+  ): string[] => {
+    ctx.font = font;
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [""];
+    const lines: string[] = [];
+    let currentLine = words.shift() ?? "";
+    words.forEach((word) => {
+      const tentative = `${currentLine} ${word}`;
+      if (ctx.measureText(tentative).width > maxWidth) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = tentative;
+      }
+    });
+    if (currentLine) lines.push(currentLine);
+    return lines;
+  };
+
+  const handleDownload = async (o: SalesOrder) => {
+    try {
+      const cfg = (await getTicketsConfigRemote<TicketsConfig>()) ?? DEFAULT_TICKETS_CONFIG;
+      const isSale = o.kind === "sale";
+      const baseFontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+      const styles = {
+        title: { font: `700 20px ${baseFontFamily}`, color: "#111827", lineHeight: 28 },
+        subtitle: { font: `400 11px ${baseFontFamily}`, color: "#6b7280", lineHeight: 18 },
+        section: { font: `700 13px ${baseFontFamily}`, color: "#111827", lineHeight: 22 },
+        text: { font: `400 13px ${baseFontFamily}`, color: "#111827", lineHeight: 20 },
+        muted: { font: `400 12px ${baseFontFamily}`, color: "#6b7280", lineHeight: 18 },
+        emphasis: { font: `700 13px ${baseFontFamily}`, color: "#111827", lineHeight: 22 },
+        totalLabel: { font: `700 14px ${baseFontFamily}`, color: "#111827", lineHeight: 24 },
+        totalValue: { font: `700 18px ${baseFontFamily}`, color: "#111827", lineHeight: 26 },
+        divider: 16,
+      } as const;
+
+      const paddingX = 20;
+      const paddingY = 24;
+
+      // Measure width
+      const measCanvas = document.createElement("canvas");
+      const measCtx = measCanvas.getContext("2d");
+      if (!measCtx) throw new Error("No se pudo crear contexto de medición");
+      const measureText = (t: string, f: string) => {
+        measCtx.font = f;
+        return measCtx.measureText(t).width;
+      };
+      const rowWidth = (l: string, r: string, lf: string, rf: string, gap = 8) =>
+        measureText(l, lf) + measureText(r, rf) + paddingX * 2 + gap;
+
+      const seqText = typeof o.sequence === "number" ? String(o.sequence).padStart(6, "0") : "-";
+      const titleText = isSale ? `Venta #${seqText}` : `Orden de Venta #${seqText}`;
+      const headerCandidates = [
+        { text: cfg.companyName, font: styles.title.font },
+        { text: cfg.subtitle, font: styles.subtitle.font },
+        { text: titleText, font: styles.emphasis.font },
+        { text: ticketDateFormatter.format(new Date(o.createdAt)), font: styles.muted.font },
+      ];
+
+      let neededWidth = 0;
+      headerCandidates.forEach((h) => {
+        neededWidth = Math.max(neededWidth, measureText(h.text, h.font) + paddingX * 2);
+      });
+      neededWidth = Math.max(
+        neededWidth,
+        rowWidth("Cliente:", o.clientName, styles.section.font, styles.text.font),
+        rowWidth("CI:", o.clientDocumentId, styles.section.font, styles.text.font),
+        rowWidth("Contacto:", o.clientPhone, styles.section.font, styles.text.font),
+        rowWidth("Atendido por:", o.performedByUsername ? `${o.performedByUsername} - ${o.performedByRole === "admin" ? "Administrador" : "Operador"}` : "", styles.section.font, styles.text.font),
+      );
+      o.items.forEach((it) => {
+        neededWidth = Math.max(
+          neededWidth,
+          rowWidth(it.productName, formatBs(it.lineTotal), styles.emphasis.font, styles.emphasis.font),
+          measureText(`P/U: ${formatBs(it.unitPrice)}  ×  ${it.quantity}`, styles.muted.font) + paddingX * 2,
+        );
+      });
+      neededWidth = Math.max(
+        neededWidth,
+        rowWidth("Subtotal:", formatBs(o.subtotal), styles.section.font, styles.text.font),
+        rowWidth("Descuento:", formatBs(o.discount), styles.section.font, styles.text.font),
+        rowWidth("TOTAL:", formatBs(o.total), styles.totalLabel.font, styles.totalValue.font),
+        rowWidth("Método de Pago:", o.paymentMethod, styles.section.font, styles.text.font),
+      );
+
+      const minWidth = 360;
+      const maxWidth = 540;
+      const width = Math.max(minWidth, Math.min(maxWidth, Math.ceil(neededWidth)));
+      const contentWidth = width - paddingX * 2;
+
+      // Canvas
+      const canvas = document.createElement("canvas");
+      const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 1));
+      const approxLines = 16 + o.items.length * 2 + 8;
+      const approxHeight = paddingY * 2 + approxLines * 22 + 100;
+      canvas.width = Math.ceil(width * scale);
+      canvas.height = Math.ceil(approxHeight * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("No se pudo obtener el contexto de canvas");
+      ctx.scale(scale, scale);
+
+      // Background
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, approxHeight);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.fillRect(0, 0, 1, approxHeight);
+      ctx.fillRect(width - 1, 0, 1, approxHeight);
+
+      ctx.textBaseline = "top";
+      let y = paddingY;
+
+      const center = (t: string, f: string, c: string, lh: number) => {
+        ctx.font = f;
+        ctx.fillStyle = c;
+        const w = ctx.measureText(t).width;
+        ctx.fillText(t, Math.round((width - w) / 2), y);
+        y += lh;
+      };
+      const row = (
+        l: string,
+        r: string,
+        lf: string,
+        rf: string,
+        lc: string,
+        rc: string,
+        lh: number,
+      ) => {
+        ctx.font = lf;
+        ctx.fillStyle = lc;
+        ctx.fillText(l, paddingX, y);
+        ctx.font = rf;
+        ctx.fillStyle = rc;
+        const rw = ctx.measureText(r).width;
+        ctx.fillText(r, paddingX + contentWidth - rw, y);
+        y += lh;
+      };
+      const divider = () => {
+        ctx.font = styles.muted.font;
+        ctx.fillStyle = "#9ca3af";
+        const dashWidth = ctx.measureText("-").width || 4;
+        const count = Math.max(8, Math.floor(contentWidth / dashWidth) - 2);
+        const dashes = "-".repeat(count);
+        const w = ctx.measureText(dashes).width;
+        ctx.fillText(dashes, Math.round((width - w) / 2), y);
+        y += styles.divider;
+      };
+      const muted = (t: string) => {
+        ctx.font = styles.muted.font;
+        ctx.fillStyle = styles.muted.color;
+        ctx.fillText(t, paddingX, y);
+        y += styles.muted.lineHeight;
+      };
+      const wrapped = (t: string, f: string, c: string, mw: number) => {
+        const lines = wrapText(ctx as CanvasRenderingContext2D, t, f, mw);
+        ctx.font = f;
+        ctx.fillStyle = c;
+        lines.forEach((ln) => {
+          ctx.fillText(ln, paddingX, y);
+          y += styles.text.lineHeight;
+        });
+      };
+
+      // Header
+      center(cfg.companyName, styles.title.font, styles.title.color, styles.title.lineHeight);
+      center(cfg.subtitle, styles.subtitle.font, styles.subtitle.color, styles.subtitle.lineHeight);
+      center(titleText, styles.emphasis.font, styles.emphasis.color, styles.emphasis.lineHeight);
+      center(ticketDateFormatter.format(new Date(o.createdAt)), styles.muted.font, styles.muted.color, styles.muted.lineHeight);
+      y = Math.max(y - 6, paddingY);
+      divider();
+
+      // Client and attendant
+      row("Cliente:", o.clientName, styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      row("CI:", o.clientDocumentId, styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      row("Contacto:", o.clientPhone, styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      row("Atendido por:", o.performedByUsername ? `${o.performedByUsername} - ${o.performedByRole === "admin" ? "Administrador" : "Operador"}` : "", styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      divider();
+
+      // Items
+      o.items.forEach((it) => {
+        row(it.productName, formatBs(it.lineTotal), styles.emphasis.font, styles.emphasis.font, styles.emphasis.color, styles.emphasis.color, styles.emphasis.lineHeight);
+        muted(`P/U: ${formatBs(it.unitPrice)}  ×  ${it.quantity}`);
+        y += 4;
+      });
+
+      divider();
+      // Totals
+      row("Subtotal:", formatBs(o.subtotal), styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      row("Descuento:", formatBs(o.discount), styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+
+      // Address box
+      y += 6;
+      const boxX = paddingX;
+      const boxY = y;
+      const boxW = contentWidth;
+      const addrText = o.deliveryAddress || "-";
+      const addressLines = wrapText(ctx as CanvasRenderingContext2D, addrText, styles.text.font, boxW - 20);
+      const boxPaddingTop = 8;
+      const boxPaddingBottom = 8;
+      const titleHeight = styles.section.lineHeight;
+      const contentHeight = addressLines.length * styles.text.lineHeight;
+      const boxH = boxPaddingTop + titleHeight + contentHeight + boxPaddingBottom;
+      ctx.fillStyle = "#f3f4f6";
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.strokeStyle = "#e5e7eb";
+      ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+      y += boxPaddingTop;
+      ctx.font = styles.section.font;
+      ctx.fillStyle = styles.section.color;
+      ctx.fillText("Lugar de Envío:", boxX + 10, y);
+      y += styles.section.lineHeight;
+      ctx.font = styles.text.font;
+      ctx.fillStyle = styles.text.color;
+      addressLines.forEach((ln) => {
+        ctx.fillText(ln, boxX + 10, y);
+        y += styles.text.lineHeight;
+      });
+      y = boxY + boxH + 10;
+
+      divider();
+      // TOTAL emphasized
+      ctx.font = styles.totalLabel.font;
+      ctx.fillStyle = styles.totalLabel.color;
+      ctx.fillText("TOTAL:", paddingX, y);
+      ctx.font = styles.totalValue.font;
+      const totalText = formatBs(o.total);
+      const tw = ctx.measureText(totalText).width;
+      ctx.fillText(totalText, paddingX + contentWidth - tw, y);
+      y += styles.totalValue.lineHeight + 6;
+
+      // Payment and optional notes
+      row("Método de Pago:", o.paymentMethod, styles.section.font, styles.text.font, styles.section.color, styles.text.color, styles.text.lineHeight);
+      if (o.notes && o.notes.trim()) {
+        y += 4;
+        ctx.font = styles.section.font;
+        ctx.fillStyle = styles.section.color;
+        ctx.fillText("Notas:", paddingX, y);
+        y += styles.section.lineHeight - 2;
+        wrapped(o.notes, styles.text.font, styles.text.color, contentWidth);
+      }
+
+      divider();
+      const farewell = isSale ? cfg.sale.farewell : cfg.order.farewell;
+      center(farewell, styles.subtitle.font, styles.subtitle.color, styles.subtitle.lineHeight + 6);
+
+      // Crop and download
+      const usedHeight = Math.ceil(y + paddingY);
+      const usedHeightPx = Math.ceil(usedHeight * scale);
+      if (usedHeightPx < canvas.height) {
+        const temp = document.createElement("canvas");
+        temp.width = Math.ceil(width * scale);
+        temp.height = usedHeightPx;
+        const tctx = temp.getContext("2d");
+        if (tctx) tctx.drawImage(canvas, 0, 0, temp.width, temp.height, 0, 0, temp.width, temp.height);
+        canvas.width = temp.width;
+        canvas.height = temp.height;
+        const cctx = canvas.getContext("2d");
+        if (cctx) cctx.drawImage(temp, 0, 0);
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((r) => resolve(r), "image/png", 0.95));
+      if (!blob) throw new Error("No se pudo generar la imagen del ticket");
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${isSale ? "venta" : "orden-venta"}-${o.sequence ?? o.id}.png`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+
+      try { notify({ title: isSale ? "Ticket de venta" : "Ticket de orden", message: "Descarga iniciada.", variant: "success" }); } catch {}
+    } catch (err) {
+      console.warn("No se pudo generar el ticket desde historial:", err);
+      try { notify({ title: "No se pudo descargar", message: "Intenta nuevamente.", variant: "error" }); } catch {}
+    }
+  };
+
   if (!isHydrated || !user) {
     return (
       <main className="flex min-h-svh items-center justify-center px-4 text-sm text-slate-400">
@@ -367,6 +659,17 @@ export default function HistoryPage() {
                         <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
+                            onClick={() => handleDownload(o)}
+                            aria-label="Descargar ticket"
+                            className="inline-flex items-center justify-center rounded-lg border border-slate-700/60 px-2.5 py-1.5 text-xs text-slate-200 transition hover:border-emerald-500/70 hover:text-emerald-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5">
+                              <path fillRule="evenodd" d="M12 3.75a.75.75 0 01.75.75v8.69l2.47-2.47a.75.75 0 111.06 1.06l-3.75 3.75a.75.75 0 01-1.06 0L7.72 12.78a.75.75 0 111.06-1.06l2.47 2.47V4.5A.75.75 0 0112 3.75z" clipRule="evenodd" />
+                              <path d="M3.75 15.75a.75.75 0 01.75-.75h15a.75.75 0 01.75.75v2.25A2.25 2.25 0 0118 20.25H6A2.25 2.25 0 013.75 18v-2.25z" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setDetail(o)}
                             aria-label="Ver detalle"
                             className="inline-flex items-center justify-center rounded-lg border border-slate-700/60 px-2.5 py-1.5 text-xs text-slate-200 transition hover:border-sky-500/70 hover:text-sky-200 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
@@ -451,6 +754,13 @@ export default function HistoryPage() {
                     <p className="whitespace-nowrap text-right text-sm font-semibold">{formatBs(o.total)}</p>
                   </div>
                   <div className="mt-3 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDownload(o)}
+                      className="inline-flex items-center justify-center rounded-lg border border-slate-700/60 px-3 py-1.5 text-xs font-medium text-slate-200"
+                    >
+                      Descargar
+                    </button>
                     <button
                       type="button"
                       onClick={() => setDetail(o)}
