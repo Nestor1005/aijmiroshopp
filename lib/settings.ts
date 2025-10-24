@@ -1,4 +1,9 @@
-import { USERS_STORAGE_KEY, TICKETS_CONFIG_STORAGE_KEY } from "./storage";
+import {
+  getUsersConfigRemote,
+  saveUsersConfigRemote,
+  getTicketsConfigRemote,
+  saveTicketsConfigRemote,
+} from "./supabase-repo";
 
 export type OperatorUser = {
   id: string;
@@ -12,11 +17,10 @@ export type UsersConfig = {
   operators: OperatorUser[];
 };
 
+// Cloud-first defaults (no demo credentials). First-run setup will prompt admin creation.
 export const DEFAULT_USERS_CONFIG: UsersConfig = {
-  admin: { username: "Anahi", password: "12345" },
-  operators: [
-    { id: "op-1", username: "Operador", password: "12345", active: true },
-  ],
+  admin: { username: "", password: "" },
+  operators: [],
 };
 
 export type TicketSideConfig = {
@@ -38,46 +42,36 @@ export const DEFAULT_TICKETS_CONFIG: TicketsConfig = {
   order: { nextNumber: 1, farewell: "¡Gracias por su preferencia!" },
 };
 
-export function getUsersConfig(): UsersConfig {
+// Cloud-backed helpers (async)
+export async function getUsersConfig(): Promise<UsersConfig> {
   try {
-    const raw = typeof window !== "undefined" ? window.localStorage.getItem(USERS_STORAGE_KEY) : null;
-    if (raw) {
-      const parsed = JSON.parse(raw) as UsersConfig;
-      if (parsed && parsed.admin && Array.isArray(parsed.operators)) return parsed;
-    }
+    const remote = await getUsersConfigRemote();
+    if (remote && remote.admin && Array.isArray(remote.operators)) return remote;
   } catch {}
   return { ...DEFAULT_USERS_CONFIG, operators: [...DEFAULT_USERS_CONFIG.operators] };
 }
 
-export function saveUsersConfig(cfg: UsersConfig) {
-  try {
-    window.localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(cfg));
-  } catch {}
+export async function saveUsersConfig(cfg: UsersConfig): Promise<void> {
+  await saveUsersConfigRemote(cfg);
 }
 
-export function isInitialSetupRequired(): boolean {
+export async function isInitialSetupRequired(): Promise<boolean> {
   try {
-    const cfg = getUsersConfig();
-    const needsAdmin = !cfg.admin.username || !cfg.admin.password;
-    return needsAdmin;
+    const cfg = await getUsersConfig();
+    return !cfg.admin.username || !cfg.admin.password;
   } catch {
     return true;
   }
 }
 
-export function getTicketsConfig(): TicketsConfig {
+export async function getTicketsConfig(): Promise<TicketsConfig> {
   try {
-    const raw = typeof window !== "undefined" ? window.localStorage.getItem(TICKETS_CONFIG_STORAGE_KEY) : null;
-    if (raw) {
-      const parsed = JSON.parse(raw) as TicketsConfig;
-      if (parsed && parsed.companyName && parsed.subtitle && parsed.sale && parsed.order) return parsed;
-    }
+    const remote = await getTicketsConfigRemote<TicketsConfig>();
+    if (remote && (remote as TicketsConfig).companyName) return remote as TicketsConfig;
   } catch {}
   return JSON.parse(JSON.stringify(DEFAULT_TICKETS_CONFIG)) as TicketsConfig;
 }
 
-export function saveTicketsConfig(cfg: TicketsConfig) {
-  try {
-    window.localStorage.setItem(TICKETS_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
-  } catch {}
+export async function saveTicketsConfig(cfg: TicketsConfig): Promise<void> {
+  await saveTicketsConfigRemote<TicketsConfig>(cfg);
 }

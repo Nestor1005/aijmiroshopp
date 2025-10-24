@@ -1,7 +1,6 @@
 'use client';
 
 import Link from "next/link";
-import { uid } from "@/lib/id";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
 import {
@@ -14,11 +13,11 @@ import {
   useState,
 } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { SAMPLE_CLIENTS, type Client } from "@/lib/entities";
-import { CLIENTS_STORAGE_KEY } from "@/lib/storage";
+import { type Client } from "@/lib/entities";
 import { isValidPhone } from "@/lib/validators";
 import { useConfirm } from "@/components/confirm/provider";
 import { useNotify } from "@/components/notifications/provider";
+import { deleteClient, listClients, upsertClient } from "@/lib/supabase-repo";
 
 const TABLE_HEADERS = [
   { key: "name", label: "Nombre", align: "text-left" },
@@ -153,7 +152,6 @@ const INITIAL_FORM_STATE: ClientFormState = {
 };
 
 const PAGE_SIZE_OPTIONS = [5, 10, 50];
-const exampleClients: Client[] = SAMPLE_CLIENTS.map((client) => ({ ...client }));
 
 export default function ClientsPage() {
   const router = useRouter();
@@ -161,7 +159,7 @@ export default function ClientsPage() {
   const confirm = useConfirm();
   const notify = useNotify();
 
-  const [clients, setClients] = useState<Client[]>(exampleClients);
+  const [clients, setClients] = useState<Client[]>([]);
   const [hasLoadedClients, setHasLoadedClients] = useState(false);
   const [formState, setFormState] = useState<ClientFormState>(INITIAL_FORM_STATE);
   const [formError, setFormError] = useState<string | null>(null);
@@ -196,39 +194,36 @@ export default function ClientsPage() {
       return;
     }
 
-    try {
-      const raw = window.localStorage.getItem(CLIENTS_STORAGE_KEY);
-
-      if (raw) {
-        const parsed = JSON.parse(raw) as Client[];
-        if (Array.isArray(parsed)) {
-          setClients(parsed.map((client) => ({ ...client })));
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await listClients();
+        if (!cancelled) {
+          // Map repo Client to UI Client shape (already aligned)
+          setClients(
+            rows.map((c) => ({
+              id: c.id,
+              name: c.name,
+              documentId: c.documentId,
+              phone: c.phone,
+              address: c.address,
+              createdAt: c.createdAt,
+            })),
+          );
         }
-      } else {
-        window.localStorage.setItem(
-          CLIENTS_STORAGE_KEY,
-          JSON.stringify(exampleClients),
-        );
+      } catch (err) {
+        console.error("Error cargando clientes desde la nube", err);
+        try { notify({ title: "Error", message: "No se pudieron cargar los clientes.", variant: "error" }); } catch {}
+        setFormError("No se pudieron cargar los clientes desde la nube.");
+      } finally {
+        if (!cancelled) setHasLoadedClients(true);
       }
-    } catch (error) {
-      console.warn("No se pudo cargar la lista de clientes desde almacenamiento local:", error);
-      window.localStorage.removeItem(CLIENTS_STORAGE_KEY);
-    } finally {
-      setHasLoadedClients(true);
-    }
-  }, [hasLoadedClients, isHydrated, user]);
+    })();
 
-  useEffect(() => {
-    if (!isHydrated || !user || user.role !== "admin" || !hasLoadedClients) {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(CLIENTS_STORAGE_KEY, JSON.stringify(clients));
-    } catch (error) {
-      console.warn("No se pudo guardar la lista de clientes en almacenamiento local:", error);
-    }
-  }, [clients, isHydrated, user, hasLoadedClients]);
+    return () => {
+      cancelled = true;
+    };
+  }, [hasLoadedClients, isHydrated, user, notify]);
 
   useEffect(() => {
     if (!selectedClient) {
@@ -312,7 +307,7 @@ export default function ClientsPage() {
     }));
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
     setFeedback(null);
@@ -332,41 +327,54 @@ export default function ClientsPage() {
     const normalizedPhone = formState.phone.trim();
     const normalizedAddress = formState.address.trim();
 
-    let feedbackMessage = "";
-
-    if (editingClient) {
-      const updatedClient: Client = {
-        ...editingClient,
-        name: normalizedName,
-        documentId: normalizedDocumentId,
-        phone: normalizedPhone,
-        address: normalizedAddress,
-      };
-
-      setClients((prev) =>
-        prev.map((client) => (client.id === editingClient.id ? updatedClient : client)),
-      );
-      if (selectedClient?.id === editingClient.id) {
-        setSelectedClient(updatedClient);
+    try {
+      if (editingClient) {
+        const saved = await upsertClient({
+          id: editingClient.id,
+          name: normalizedName,
+          documentId: normalizedDocumentId,
+          phone: normalizedPhone,
+          address: normalizedAddress,
+        });
+        const updatedClient: Client = {
+          id: saved.id,
+          name: saved.name,
+          documentId: saved.documentId,
+          phone: saved.phone,
+          address: saved.address,
+          createdAt: saved.createdAt,
+        };
+        setClients((prev) => prev.map((c) => (c.id === editingClient.id ? updatedClient : c)));
+        if (selectedClient?.id === editingClient.id) {
+          setSelectedClient(updatedClient);
+        }
+        resetForm();
+        setFeedback(`Cliente "${updatedClient.name}" actualizado.`);
+        try { notify({ title: "Cliente actualizado", message: updatedClient.name, variant: "success" }); } catch {}
+      } else {
+        const saved = await upsertClient({
+          name: normalizedName,
+          documentId: normalizedDocumentId,
+          phone: normalizedPhone,
+          address: normalizedAddress,
+        });
+        const newClient: Client = {
+          id: saved.id,
+          name: saved.name,
+          documentId: saved.documentId,
+          phone: saved.phone,
+          address: saved.address,
+          createdAt: saved.createdAt,
+        };
+        setClients((prev) => [newClient, ...prev]);
+        resetForm();
+        setFeedback(`Cliente "${newClient.name}" agregado.`);
+        try { notify({ title: "Cliente agregado", message: newClient.name, variant: "success" }); } catch {}
       }
-      feedbackMessage = `Cliente "${updatedClient.name}" actualizado.`;
-    } else {
-      const newClient: Client = {
-        id: uid(),
-        name: normalizedName,
-        documentId: normalizedDocumentId,
-        phone: normalizedPhone,
-        address: normalizedAddress,
-        createdAt: new Date().toISOString(),
-      };
-
-      setClients((prev) => [newClient, ...prev]);
-      feedbackMessage = `Cliente "${newClient.name}" agregado.`;
-    }
-
-    resetForm();
-    if (feedbackMessage) {
-      setFeedback(feedbackMessage);
+    } catch (err) {
+      console.error("Error guardando cliente", err);
+      setFormError("No se pudo guardar el cliente en la nube.");
+      try { notify({ title: "Error", message: "No se pudo guardar el cliente.", variant: "error" }); } catch {}
     }
   };
 
@@ -383,12 +391,22 @@ export default function ClientsPage() {
     });
 
     if (confirmClear) {
-      setClients([]);
-      setSelectedClient(null);
-      setPage(1);
-      resetForm();
-      setFeedback("Clientes eliminados correctamente.");
-      try { notify({ title: "Clientes vaciados", message: "Se eliminaron todos los clientes.", variant: "success" }); } catch {}
+      try {
+        // Bulk delete in serial to avoid rate-limits; adjust if needed
+        for (const c of clients) {
+          await deleteClient(c.id);
+        }
+        setClients([]);
+        setSelectedClient(null);
+        setPage(1);
+        resetForm();
+        setFeedback("Clientes eliminados correctamente.");
+        try { notify({ title: "Clientes vaciados", message: "Se eliminaron todos los clientes.", variant: "success" }); } catch {}
+      } catch (err) {
+        console.error("Error al vaciar clientes", err);
+        setFormError("No se pudieron eliminar todos los clientes en la nube.");
+        try { notify({ title: "Error", message: "No se pudieron eliminar todos los clientes.", variant: "error" }); } catch {}
+      }
     }
   };
 
@@ -462,7 +480,7 @@ export default function ClientsPage() {
         return;
       }
 
-      const importedClients: Client[] = [];
+  const importedClients: Array<{ name: string; documentId: string; phone: string; address: string }> = [];
       const issues: string[] = [];
 
       rawRows.slice(1).forEach((rowValues, rowIndex) => {
@@ -509,23 +527,46 @@ export default function ClientsPage() {
         }
 
         importedClients.push({
-          id: uid(),
           name,
           documentId,
           phone,
           address,
-          createdAt: new Date().toISOString(),
         });
       });
 
       if (importedClients.length > 0) {
-        setClients((prev) => [...importedClients, ...prev]);
-        setPage(1);
-        setFeedback(
-          `${importedClients.length} cliente${importedClients.length === 1 ? "" : "s"} importado${
-            importedClients.length === 1 ? "" : "s"
-          } correctamente.`,
-        );
+        try {
+          const results = await Promise.all(
+            importedClients.map((c) =>
+              upsertClient({
+                name: c.name,
+                documentId: c.documentId,
+                phone: c.phone,
+                address: c.address,
+              }),
+            ),
+          );
+          const created: Client[] = results.map((r) => ({
+            id: r.id,
+            name: r.name,
+            documentId: r.documentId,
+            phone: r.phone,
+            address: r.address,
+            createdAt: r.createdAt,
+          }));
+          setClients((prev) => [...created, ...prev]);
+          setPage(1);
+          setFeedback(
+            `${created.length} cliente${created.length === 1 ? "" : "s"} importado${
+              created.length === 1 ? "" : "s"
+            } correctamente.`,
+          );
+          try { notify({ title: "Importación completa", message: `${created.length} clientes`, variant: "success" }); } catch {}
+        } catch (err) {
+          console.error("Error importando clientes", err);
+          setFormError("Ocurrió un error importando clientes a la nube.");
+          try { notify({ title: "Error", message: "No se pudieron importar algunos clientes.", variant: "error" }); } catch {}
+        }
       }
 
       if (issues.length > 0) {
@@ -617,26 +658,33 @@ export default function ClientsPage() {
       return;
     }
 
-    const nextClients = clients.filter((client) => client.id !== clientId);
-    setClients(nextClients);
+    try {
+      await deleteClient(clientId);
+      const nextClients = clients.filter((client) => client.id !== clientId);
+      setClients(nextClients);
 
-    if (editingClient?.id === clientId) {
-      resetForm();
-    } else {
-      setFormError(null);
+      if (editingClient?.id === clientId) {
+        resetForm();
+      } else {
+        setFormError(null);
+      }
+
+      const nextTotalPages = Math.max(1, Math.ceil(nextClients.length / pageSize));
+      if (page > nextTotalPages) {
+        setPage(nextTotalPages);
+      }
+
+      if (selectedClient?.id === clientId) {
+        setSelectedClient(null);
+      }
+
+      setFeedback(`Cliente "${target.name}" eliminado.`);
+      try { notify({ title: "Cliente eliminado", message: `Se eliminó ${target.name}.`, variant: "success" }); } catch {}
+    } catch (err) {
+      console.error("Error eliminando cliente", err);
+      setFormError("No se pudo eliminar el cliente en la nube.");
+      try { notify({ title: "Error", message: "No se pudo eliminar el cliente.", variant: "error" }); } catch {}
     }
-
-    const nextTotalPages = Math.max(1, Math.ceil(nextClients.length / pageSize));
-    if (page > nextTotalPages) {
-      setPage(nextTotalPages);
-    }
-
-    if (selectedClient?.id === clientId) {
-      setSelectedClient(null);
-    }
-
-    setFeedback(`Cliente "${target.name}" eliminado.`);
-    try { notify({ title: "Cliente eliminado", message: `Se eliminó ${target.name}.`, variant: "success" }); } catch {}
   };
 
   const pageNumbers = useMemo(() => {

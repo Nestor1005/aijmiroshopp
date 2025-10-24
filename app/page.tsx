@@ -7,7 +7,7 @@ import {
   useAuth,
   type Role,
 } from "@/lib/auth-context";
-import { isInitialSetupRequired, saveUsersConfig, type UsersConfig } from "@/lib/settings";
+import { getUsersConfig, saveUsersConfig, type UsersConfig } from "@/lib/settings";
 
 type FormState = {
   username: string;
@@ -28,13 +28,7 @@ export default function Home() {
   const [formState, setFormState] = useState<FormState>(INITIAL_FORM_STATE);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [setupMode] = useState<boolean>(() => {
-    try {
-      return isInitialSetupRequired();
-    } catch {
-      return false;
-    }
-  });
+  const [setupMode, setSetupMode] = useState<boolean>(true);
   const [setupUsername, setSetupUsername] = useState("");
   const [setupPassword, setSetupPassword] = useState("");
   const [setupPassword2, setSetupPassword2] = useState("");
@@ -45,7 +39,18 @@ export default function Home() {
     }
   }, [isHydrated, user, router]);
 
-  // setupMode se determina en el estado inicial usando isInitialSetupRequired()
+  // Determinar modo de configuración inicial desde la nube
+  useEffect(() => {
+    (async () => {
+      try {
+        const cfg = await getUsersConfig();
+        const needsAdmin = !cfg.admin.username || !cfg.admin.password;
+        setSetupMode(Boolean(needsAdmin));
+      } catch {
+        setSetupMode(true);
+      }
+    })();
+  }, []);
 
   const handleInputChange = (
     field: keyof FormState,
@@ -62,7 +67,7 @@ export default function Home() {
     event.preventDefault();
     setIsSubmitting(true);
 
-    const result = login(formState);
+  const result = await login(formState);
     if (!result.success) {
       setError(result.message);
       setIsSubmitting(false);
@@ -83,9 +88,9 @@ export default function Home() {
       setError("Las contraseñas no coinciden.");
       return;
     }
-    const cfg: UsersConfig = { admin: { username: setupUsername.trim(), password: setupPassword }, operators: [] };
-    saveUsersConfig(cfg);
-    const result = login({ username: setupUsername.trim(), password: setupPassword, role: "admin" });
+  const cfg: UsersConfig = { admin: { username: setupUsername.trim(), password: setupPassword }, operators: [] };
+  await saveUsersConfig(cfg);
+  const result = await login({ username: setupUsername.trim(), password: setupPassword, role: "admin" });
     if (!result.success) {
       setError(result.message);
       return;

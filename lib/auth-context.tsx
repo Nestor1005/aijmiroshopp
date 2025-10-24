@@ -30,11 +30,10 @@ type LoginResponse =
 type AuthContextValue = {
   user: User | null;
   isHydrated: boolean;
-  login: (payload: LoginPayload) => LoginResponse;
+  login: (payload: LoginPayload) => Promise<LoginResponse>;
   logout: () => void;
 };
 
-const SESSION_STORAGE_KEY = "aijmiroshop:auth";
 
 const ROLE_LABELS: Record<Role, string> = {
   admin: "Administrador",
@@ -48,23 +47,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as User;
-        setUser(parsed);
-      }
-    } catch (error) {
-      console.warn("No se pudo recuperar la sesión almacenada", error);
-      sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    } finally {
-      setIsHydrated(true);
-    }
+    // Cloud-only: no sessionStorage/localStorage persistence
+    const id = setTimeout(() => setIsHydrated(true), 0);
+    return () => clearTimeout(id);
   }, []);
 
-  const login = ({ username, password, role }: LoginPayload): LoginResponse => {
+  const login = async ({ username, password, role }: LoginPayload): Promise<LoginResponse> => {
     const normalizedUsername = username.trim();
-    const cfg = getUsersConfig();
+    const cfg = await getUsersConfig();
 
     if (role === "admin") {
       const isUserValid = normalizedUsername.toLowerCase() === cfg.admin.username.toLowerCase();
@@ -74,7 +64,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
       const authenticatedUser: User = { username: cfg.admin.username, role };
       setUser(authenticatedUser);
-      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(authenticatedUser));
       return { success: true, user: authenticatedUser };
     }
 
@@ -87,13 +76,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
     const authenticatedUser: User = { username: op.username, role };
     setUser(authenticatedUser);
-    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(authenticatedUser));
     return { success: true, user: authenticatedUser };
   };
 
   const logout = () => {
     setUser(null);
-    sessionStorage.removeItem(SESSION_STORAGE_KEY);
   };
 
   const value = useMemo(

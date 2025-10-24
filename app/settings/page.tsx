@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import {
   DEFAULT_TICKETS_CONFIG,
@@ -20,8 +20,25 @@ export default function SettingsPage() {
   const { user, isHydrated } = useAuth();
   const unauthorizedMessage = !isHydrated || !user ? "Validando permisos..." : user.role !== "admin" ? "Acceso solo para administradores." : null;
 
-  const [usersCfg, setUsersCfg] = useState<UsersConfig>(getUsersConfig());
-  const [ticketsCfg, setTicketsCfg] = useState<TicketsConfig>(getTicketsConfig());
+  const [usersCfg, setUsersCfg] = useState<UsersConfig>(DEFAULT_USERS_CONFIG);
+  const [ticketsCfg, setTicketsCfg] = useState<TicketsConfig>(DEFAULT_TICKETS_CONFIG);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const [u, t] = await Promise.all([getUsersConfig(), getTicketsConfig()]);
+        if (!mounted) return;
+        setUsersCfg(u);
+        setTicketsCfg(t);
+      } catch {
+        // keep defaults
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Derived previews
   const sampleSaleNumber = useMemo(() => String(ticketsCfg.sale.nextNumber).padStart(6, "0"), [ticketsCfg.sale.nextNumber]);
@@ -31,41 +48,41 @@ export default function SettingsPage() {
   const updateAdminField = (key: "username" | "password", val: string) => {
     const next = { ...usersCfg, admin: { ...usersCfg.admin, [key]: val } };
     setUsersCfg(next);
-    saveUsersConfig(next);
+    void saveUsersConfig(next);
   };
 
   const addOperator = () => {
     const next: OperatorUser = { id: uid(), username: "", password: "", active: true };
     const cfg = { ...usersCfg, operators: [next, ...usersCfg.operators] };
     setUsersCfg(cfg);
-    saveUsersConfig(cfg);
+    void saveUsersConfig(cfg);
   };
 
   const updateOperator = (id: string, patch: Partial<OperatorUser>) => {
     const ops = usersCfg.operators.map((o) => (o.id === id ? { ...o, ...patch } : o));
     const cfg = { ...usersCfg, operators: ops };
     setUsersCfg(cfg);
-    saveUsersConfig(cfg);
+    void saveUsersConfig(cfg);
   };
 
   const removeOperator = (id: string) => {
     const ops = usersCfg.operators.filter((o) => o.id !== id);
     const cfg = { ...usersCfg, operators: ops };
     setUsersCfg(cfg);
-    saveUsersConfig(cfg);
+    void saveUsersConfig(cfg);
   };
 
   const resetUsers = () => {
     const cfg = { ...DEFAULT_USERS_CONFIG, operators: [...DEFAULT_USERS_CONFIG.operators] };
     setUsersCfg(cfg);
-    saveUsersConfig(cfg);
+    void saveUsersConfig(cfg);
   };
 
   // Tickets handlers
   const updateTickets = (patch: Partial<TicketsConfig>) => {
     const cfg = { ...ticketsCfg, ...patch } as TicketsConfig;
     setTicketsCfg(cfg);
-    saveTicketsConfig(cfg);
+    void saveTicketsConfig(cfg);
   };
 
   const updateTicketSide = (
@@ -74,13 +91,13 @@ export default function SettingsPage() {
   ) => {
     const cfg = { ...ticketsCfg, [side]: { ...ticketsCfg[side], ...patch } } as TicketsConfig;
     setTicketsCfg(cfg);
-    saveTicketsConfig(cfg);
+    void saveTicketsConfig(cfg);
   };
 
   const resetTickets = () => {
     const cfg = JSON.parse(JSON.stringify(DEFAULT_TICKETS_CONFIG)) as TicketsConfig;
     setTicketsCfg(cfg);
-    saveTicketsConfig(cfg);
+    void saveTicketsConfig(cfg);
   };
 
   return (

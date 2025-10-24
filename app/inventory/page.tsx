@@ -15,9 +15,8 @@ import {
 } from "react";
 import { formatBs, parseBsInput } from "@/lib/currency";
 import { useAuth } from "@/lib/auth-context";
-import { SAMPLE_PRODUCTS, type Product, type ProductImage } from "@/lib/entities";
-import { uid } from "@/lib/id";
-import { INVENTORY_STORAGE_KEY } from "@/lib/storage";
+import { type Product, type ProductImage } from "@/lib/entities";
+import { listProducts, upsertProduct as upsertProductCloud, deleteProduct as deleteProductCloud } from "@/lib/supabase-repo";
 import { useConfirm } from "@/components/confirm/provider";
 import { useNotify } from "@/components/notifications/provider";
 
@@ -44,7 +43,7 @@ const INITIAL_FORM_STATE: ProductFormState = {
 
 const PAGE_SIZE_OPTIONS = [5, 10, 50];
 
-const exampleProducts: Product[] = SAMPLE_PRODUCTS.map((product) => ({ ...product }));
+// Cloud-only: products are loaded from Supabase; no local samples
 
 const XLSX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -205,7 +204,7 @@ export default function InventoryPage() {
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   const [formState, setFormState] = useState<ProductFormState>(INITIAL_FORM_STATE);
   const [formError, setFormError] = useState<string | null>(null);
-  const [products, setProducts] = useState<Product[]>(exampleProducts);
+  const [products, setProducts] = useState<Product[]>([]);
   const [hasLoadedProducts, setHasLoadedProducts] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(1);
@@ -230,43 +229,20 @@ export default function InventoryPage() {
   }, [isHydrated, user, router]);
 
   useEffect(() => {
-    if (!isHydrated || !user || user.role !== "admin" || hasLoadedProducts) {
-      return;
-    }
-
-    try {
-      const raw = window.localStorage.getItem(INVENTORY_STORAGE_KEY);
-
-      if (raw) {
-        const parsed = JSON.parse(raw) as Product[];
-        if (Array.isArray(parsed)) {
-          setProducts(parsed.map((product) => ({ ...product })));
-        }
-      } else {
-        window.localStorage.setItem(
-          INVENTORY_STORAGE_KEY,
-          JSON.stringify(exampleProducts),
-        );
+    if (!isHydrated || !user || user.role !== "admin" || hasLoadedProducts) return;
+    (async () => {
+      try {
+        const rows = await listProducts();
+        setProducts(rows);
+      } catch (error) {
+        console.warn("No se pudo cargar el inventario desde la nube:", error);
+      } finally {
+        setHasLoadedProducts(true);
       }
-    } catch (error) {
-      console.warn("No se pudo cargar el inventario desde almacenamiento local:", error);
-      window.localStorage.removeItem(INVENTORY_STORAGE_KEY);
-    } finally {
-      setHasLoadedProducts(true);
-    }
+    })();
   }, [hasLoadedProducts, isHydrated, user]);
 
-  useEffect(() => {
-    if (!isHydrated || !user || user.role !== "admin" || !hasLoadedProducts) {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(INVENTORY_STORAGE_KEY, JSON.stringify(products));
-    } catch (error) {
-      console.warn("No se pudo guardar el inventario en almacenamiento local:", error);
-    }
-  }, [products, isHydrated, user, hasLoadedProducts]);
+  // No persistence en local: cloud-only
 
   useEffect(() => {
     if (!selectedProduct) {
@@ -434,28 +410,34 @@ export default function InventoryPage() {
         salePrice: salePriceValue,
         image,
       };
-
-      setProducts((prev) =>
-        prev.map((product) => (product.id === editingProduct.id ? updatedProduct : product)),
-      );
+      try {
+        const saved = await upsertProductCloud(updatedProduct);
+        setProducts((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
+      } catch (e) {
+        setFormError("No se pudo actualizar el producto en la nube.");
+        return;
+      }
       feedbackMessage = `Producto "${updatedProduct.name}" actualizado.`;
       if (selectedProduct?.id === editingProduct.id) {
-        setSelectedProduct(updatedProduct);
+        setSelectedProduct((prev) => (prev && prev.id === updatedProduct.id ? updatedProduct : prev));
       }
     } else {
-      const newProduct: Product = {
-        id: uid(),
+      const newProduct: Omit<Product, "id" | "createdAt"> = {
         name: formState.name.trim(),
         color: formState.color.trim(),
         stock: stockValue,
         cost: costValue,
         salePrice: salePriceValue,
         image,
-        createdAt: new Date().toISOString(),
       };
-
-      setProducts((prev) => [newProduct, ...prev]);
-      feedbackMessage = `Producto "${newProduct.name}" agregado al inventario.`;
+      try {
+        const saved = await upsertProductCloud(newProduct);
+        setProducts((prev) => [saved, ...prev]);
+        feedbackMessage = `Producto "${saved.name}" agregado al inventario.`;
+      } catch (e) {
+        setFormError("No se pudo guardar el producto en la nube.");
+        return;
+      }
     }
 
     resetForm();
@@ -477,14 +459,21 @@ export default function InventoryPage() {
     });
 
     if (confirmClear) {
-      setProducts([]);
-      setSelectedProduct(null);
-      setPage(1);
-      resetForm();
-      setFeedback("Inventario vaciado correctamente.");
       try {
+        // Eliminar en la nube uno por uno (simple; optimizable con SQL)
+        for (const p of products) {
+          // eslint-disable-next-line no-await-in-loop
+          await deleteProductCloud(p.id);
+        }
+        setProducts([]);
+        setSelectedProduct(null);
+        setPage(1);
+        resetForm();
+        setFeedback("Inventario vaciado correctamente.");
         notify({ title: "Inventario vaciado", message: "Se eliminaron todos los productos.", variant: "success" });
-      } catch {}
+      } catch {
+        setFormError("No se pudo vaciar el inventario en la nube.");
+      }
     }
   };
 
@@ -558,7 +547,7 @@ export default function InventoryPage() {
         return;
       }
 
-      const importedProducts: Product[] = [];
+  const importedProducts: Array<Omit<Product, "id" | "createdAt">> = [];
       const issues: string[] = [];
 
       rawRows.slice(1).forEach((rowValues, rowIndex) => {
@@ -624,25 +613,32 @@ export default function InventoryPage() {
         }
 
         importedProducts.push({
-          id: uid(),
           name,
           color,
           stock: stockValue,
           cost: costValue,
           salePrice: salePriceValue,
           image: null,
-          createdAt: new Date().toISOString(),
         });
       });
 
       if (importedProducts.length > 0) {
-        setProducts((prev) => [...importedProducts, ...prev]);
-        setPage(1);
-        setFeedback(
-          `${importedProducts.length} producto${importedProducts.length === 1 ? "" : "s"} importado${
-            importedProducts.length === 1 ? "" : "s"
-          } correctamente.`,
-        );
+        try {
+          // Guardar en la nube en serie para simplicidad
+          for (const p of importedProducts) {
+            // eslint-disable-next-line no-await-in-loop
+            const saved = await upsertProductCloud(p);
+            setProducts((prev) => [saved, ...prev]);
+          }
+          setPage(1);
+          setFeedback(
+            `${importedProducts.length} producto${importedProducts.length === 1 ? "" : "s"} importado${
+              importedProducts.length === 1 ? "" : "s"
+            } correctamente.`,
+          );
+        } catch (e) {
+          setFormError("Ocurrió un error al importar hacia la nube.");
+        }
       }
 
       if (issues.length > 0) {
@@ -735,8 +731,18 @@ export default function InventoryPage() {
       return;
     }
 
-    const nextProducts = products.filter((product) => product.id !== productId);
-    setProducts(nextProducts);
+    try {
+      await deleteProductCloud(productId);
+      const nextProducts = products.filter((product) => product.id !== productId);
+      setProducts(nextProducts);
+      const nextTotalPages = Math.max(1, Math.ceil(nextProducts.length / pageSize));
+      if (page > nextTotalPages) {
+        setPage(nextTotalPages);
+      }
+    } catch {
+      setFormError("No se pudo eliminar el producto en la nube.");
+      return;
+    }
 
     if (editingProduct?.id === productId) {
       resetForm();
@@ -744,10 +750,7 @@ export default function InventoryPage() {
       setFormError(null);
     }
 
-    const nextTotalPages = Math.max(1, Math.ceil(nextProducts.length / pageSize));
-    if (page > nextTotalPages) {
-      setPage(nextTotalPages);
-    }
+    // page adjustment handled above after deletion
 
     if (selectedProduct?.id === productId) {
       setSelectedProduct(null);

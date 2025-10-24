@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { SALES_ORDERS_STORAGE_KEY, INVENTORY_STORAGE_KEY } from "@/lib/storage";
-import { SALES_ORDER_PAYMENT_METHODS, SalesOrder } from "@/lib/entities";
+import { SALES_ORDER_PAYMENT_METHODS, SalesOrder, SalesOrderPaymentMethod } from "@/lib/entities";
 import { useConfirm } from "@/components/confirm/provider";
 import { useNotify } from "@/components/notifications/provider";
+import { listOrders, listProducts, deleteOrder as deleteOrderRemote, clearOrders as clearOrdersRemote } from "@/lib/supabase-repo";
+import type { OrderItem as DbOrderItem } from "@/lib/supabase-repo";
 
 const PAYMENT_METHODS = SALES_ORDER_PAYMENT_METHODS;
 
@@ -15,62 +16,63 @@ type DateRange = {
   to: string; // yyyy-mm-dd or ""
 };
 
-function useLocalStorageHistory() {
+function useCloudHistory() {
   const [data, setData] = useState<SalesOrder[]>([]);
   const [inventoryMap, setInventoryMap] = useState<Record<string, number>>({});
 
-  const load = () => {
+  const load = async () => {
     try {
-      const raw = window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY);
-      if (!raw) {
-        setData([]);
-        return;
-      }
-      const parsed = JSON.parse(raw) as SalesOrder[];
-      if (Array.isArray(parsed)) {
-        setData(
-          parsed.map((o) => ({
-            ...o,
-            items: Array.isArray(o.items) ? o.items.map((i) => ({ ...i })) : [],
-          }))
-        );
-      } else {
-        setData([]);
-      }
-    } catch {
+      const [orders, products] = await Promise.all([listOrders(), listProducts()]);
+      const map: Record<string, number> = {};
+      for (const p of products) map[p.id] = p.stock;
+      setInventoryMap(map);
+
+      // Map DB orders to UI SalesOrder type
+      const uiOrders: SalesOrder[] = (orders ?? []).map((o) => ({
+        id: o.id,
+        kind: o.kind,
+        performedByUsername: o.performed_by_username ?? undefined,
+        performedByRole: o.performed_by_role === "admin" || o.performed_by_role === "operator" ? o.performed_by_role : undefined,
+        clientId: o.client_id ?? "",
+        clientName: o.client_name ?? "",
+        clientDocumentId: o.client_document_id ?? "",
+        clientPhone: o.client_phone ?? "",
+        deliveryAddress: o.delivery_address ?? "",
+        paymentMethod: (o.payment_method as SalesOrderPaymentMethod) ?? "Efectivo",
+        sequence: o.sequence,
+        subtotal: Number(o.subtotal ?? 0),
+        discount: Number(o.discount ?? 0),
+        total: Number(o.total ?? 0),
+        notes: o.notes ?? "",
+        createdAt: o.created_at ?? new Date().toISOString(),
+        items: (o.items ?? []).map((it) => {
+          const row = it as DbOrderItem;
+          return {
+            productId: row.product_id ?? "",
+            productName: row.product_name ?? "",
+            color: row.color ?? "",
+            quantity: Number(row.qty ?? 0),
+            unitPrice: Number(row.unit_price ?? 0),
+            lineTotal: Number(row.subtotal ?? 0),
+          };
+        }),
+      }));
+      setData(uiOrders);
+    } catch (e) {
+      console.error("No se pudo cargar el historial desde la nube", e);
       setData([]);
+      setInventoryMap({});
     }
-    // cargar inventario actual
-    try {
-      const rawInv = window.localStorage.getItem(INVENTORY_STORAGE_KEY);
-      if (rawInv) {
-        const parsedInv = JSON.parse(rawInv) as Array<{ id: string; stock: number }>;
-        if (Array.isArray(parsedInv)) {
-          const map: Record<string, number> = {};
-          for (const p of parsedInv) {
-            if (p && typeof p.id === "string") map[p.id] = typeof p.stock === "number" ? p.stock : 0;
-          }
-          setInventoryMap(map);
-        }
-      }
-    } catch {}
   };
 
-  const clear = () => {
-    try {
-      window.localStorage.setItem(SALES_ORDERS_STORAGE_KEY, JSON.stringify([]));
-    } finally {
-      load();
-    }
+  const clear = async () => {
+    await clearOrdersRemote();
+    await load();
   };
 
   useEffect(() => {
-    load();
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === SALES_ORDERS_STORAGE_KEY || e.key === INVENTORY_STORAGE_KEY) load();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
   }, []);
 
   return { data, inventoryMap, reload: load, clear };
@@ -110,7 +112,7 @@ const formatBs = (n: number) =>
 
 export default function HistoryPage() {
   const { user, isHydrated } = useAuth();
-  const { data, inventoryMap, reload, clear } = useLocalStorageHistory();
+  const { data, inventoryMap, reload, clear } = useCloudHistory();
   const isAdmin = user?.role === "admin";
   const confirm = useConfirm();
   const notify = useNotify();
@@ -193,16 +195,13 @@ export default function HistoryPage() {
     });
     if (!ok) return;
     try {
-      const raw = window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY);
-      const list: SalesOrder[] = raw ? (JSON.parse(raw) as SalesOrder[]) : [];
-      const next = list.filter((o) => o.id !== id);
-      window.localStorage.setItem(SALES_ORDERS_STORAGE_KEY, JSON.stringify(next));
-      setFeedback("Registro eliminado.");
-      try { notify({ title: "Registro eliminado", message: "Se eliminó un registro del historial.", variant: "success" }); } catch {}
-      reload();
+      await deleteOrderRemote(id);
+      setFeedback("Registro eliminado en la nube.");
+      try { notify({ title: "Registro eliminado", message: "Se eliminó un registro del historial en la nube.", variant: "success" }); } catch {}
+      await reload();
     } catch {
-      setFeedback("No se pudo eliminar el registro.");
-      try { notify({ title: "Error", message: "No se pudo eliminar el registro.", variant: "error" }); } catch {}
+      setFeedback("No se pudo eliminar el registro en la nube.");
+      try { notify({ title: "Error", message: "No se pudo eliminar el registro en la nube.", variant: "error" }); } catch {}
     }
   };
 

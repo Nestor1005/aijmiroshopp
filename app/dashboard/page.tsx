@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { getRoleLabel, useAuth, type Role } from "@/lib/auth-context";
 import { formatBs } from "@/lib/currency";
-import { CLIENTS_STORAGE_KEY, INVENTORY_STORAGE_KEY, LOW_STOCK_THRESHOLD_STORAGE_KEY, SALES_ORDERS_STORAGE_KEY } from "@/lib/storage";
-import type { SalesOrder, Product } from "@/lib/entities";
+import { listOrders, listProducts, getLowStockThreshold } from "@/lib/supabase-repo";
 
 type ModuleDefinition = {
   id: string;
@@ -102,90 +101,47 @@ export default function DashboardPage() {
   const router = useRouter();
   const { user, logout, isHydrated } = useAuth();
   const [isNavOpen, setIsNavOpen] = useState(false);
-  const computeStatsImmediate = (): Stat[] => {
+  const [stats, setStats] = useState<Stat[]>([
+    { label: "Ventas del día", value: formatBs(0), hint: "Datos de Supabase" },
+    { label: "Inventario crítico", value: "0 ítems", hint: "Umbral configurable" },
+    { label: "Clientes activos", value: "0", hint: "Últimos 30 días" },
+  ]);
+
+  const computeStats = async () => {
     try {
-      const rawOrders = typeof window !== "undefined" ? window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY) : null;
-      const orders: SalesOrder[] = rawOrders ? (JSON.parse(rawOrders) as SalesOrder[]) : [];
+      const [orders, products, threshold] = await Promise.all([
+        listOrders(),
+        listProducts(),
+        getLowStockThreshold(),
+      ]);
+
       const today = todayYMD();
-      const salesToday = orders.filter((o) => (o.kind === "sale") && typeof o.createdAt === "string" && o.createdAt.slice(0, 10) === today);
-      const totalToday = salesToday.reduce((s, o) => s + (o.total ?? 0), 0);
-
-      const rawThreshold = typeof window !== "undefined" ? window.localStorage.getItem(LOW_STOCK_THRESHOLD_STORAGE_KEY) : null;
-      const threshold = (() => {
-        const n = rawThreshold ? Number(rawThreshold) : NaN;
-        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
-      })();
-      const rawInv = typeof window !== "undefined" ? window.localStorage.getItem(INVENTORY_STORAGE_KEY) : null;
-      const products: Product[] = rawInv ? (JSON.parse(rawInv) as Product[]) : [];
-      const critical = products.filter((p) => (p.stock ?? 0) <= threshold).length;
-
-      const start = new Date();
-      start.setDate(start.getDate() - 29);
-      start.setHours(0, 0, 0, 0);
-      const activeSet = new Set<string>();
-      orders.forEach((o) => {
-        if (o.kind !== "sale" || !o.createdAt) return;
-        const t = new Date(o.createdAt).getTime();
-        if (!Number.isFinite(t) || t < start.getTime()) return;
-        if (o.clientId) activeSet.add(String(o.clientId));
-      });
-      const activeClients = activeSet.size;
-
-      return [
-        { label: "Ventas del día", value: formatBs(totalToday), hint: "Integrar con Supabase para datos en vivo" },
-        { label: "Inventario crítico", value: `${critical} ítems`, hint: "Alertas configurables por categoría" },
-        { label: "Clientes activos", value: String(activeClients), hint: "Sincronizar con módulo de Clientes" },
-      ];
-    } catch {
-      return [
-        { label: "Ventas del día", value: formatBs(0), hint: "Integrar con Supabase para datos en vivo" },
-        { label: "Inventario crítico", value: "0 ítems", hint: "Alertas configurables por categoría" },
-        { label: "Clientes activos", value: "0", hint: "Sincronizar con módulo de Clientes" },
-      ];
-    }
-  };
-
-  const [stats, setStats] = useState<Stat[]>(() => computeStatsImmediate());
-
-  const computeStats = () => {
-    try {
-      // Ventas del día
-      const rawOrders = typeof window !== "undefined" ? window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY) : null;
-  const orders: SalesOrder[] = rawOrders ? (JSON.parse(rawOrders) as SalesOrder[]) : [];
-      const today = todayYMD();
-      const salesToday = orders.filter((o) => (o.kind === "sale") && typeof o.createdAt === "string" && o.createdAt.slice(0, 10) === today);
+      const salesToday = orders.filter(
+        (o) => o.kind === "sale" && typeof o.created_at === "string" && o.created_at.slice(0, 10) === today,
+      );
       const totalToday = salesToday.reduce((s, o) => s + (Number(o.total) || 0), 0);
 
-      // Inventario crítico según umbral
-      const rawThreshold = typeof window !== "undefined" ? window.localStorage.getItem(LOW_STOCK_THRESHOLD_STORAGE_KEY) : null;
-      const threshold = (() => {
-        const n = rawThreshold ? Number(rawThreshold) : NaN;
-        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
-      })();
-      const rawInv = typeof window !== "undefined" ? window.localStorage.getItem(INVENTORY_STORAGE_KEY) : null;
-  const products: Product[] = rawInv ? (JSON.parse(rawInv) as Product[]) : [];
       const critical = products.filter((p) => (Number(p?.stock) || 0) <= threshold).length;
 
-      // Clientes activos últimos 30 días (distintos con compra)
       const start = new Date();
       start.setDate(start.getDate() - 29);
       start.setHours(0, 0, 0, 0);
       const activeSet = new Set<string>();
       orders.forEach((o) => {
-        if (o.kind !== "sale" || !o.createdAt) return;
-        const t = new Date(o.createdAt).getTime();
+        if (o.kind !== "sale" || !o.created_at) return;
+        const t = new Date(o.created_at).getTime();
         if (!Number.isFinite(t) || t < start.getTime()) return;
-        if (o.clientId) activeSet.add(String(o.clientId));
+        if (o.client_id) activeSet.add(String(o.client_id));
       });
       const activeClients = activeSet.size;
 
       setStats([
-        { label: "Ventas del día", value: formatBs(totalToday), hint: "Integrar con Supabase para datos en vivo" },
-        { label: "Inventario crítico", value: `${critical} ítems`, hint: "Alertas configurables por categoría" },
-        { label: "Clientes activos", value: String(activeClients), hint: "Sincronizar con módulo de Clientes" },
+        { label: "Ventas del día", value: formatBs(totalToday), hint: "Datos de Supabase" },
+        { label: "Inventario crítico", value: `${critical} ítems`, hint: `Umbral ${threshold}` },
+        { label: "Clientes activos", value: String(activeClients), hint: "Últimos 30 días" },
       ]);
     } catch {
-      // keep defaults on parse errors
+      // leave defaults
     }
   };
 
@@ -201,30 +157,15 @@ export default function DashboardPage() {
   }, [isHydrated, user, router]);
 
   useEffect(() => {
-  // listeners only; initial state computed via initializer
-    const onStorage = (e: StorageEvent) => {
-      if (
-        e.key === SALES_ORDERS_STORAGE_KEY ||
-        e.key === INVENTORY_STORAGE_KEY ||
-        e.key === LOW_STOCK_THRESHOLD_STORAGE_KEY ||
-        e.key === CLIENTS_STORAGE_KEY
-      ) {
-        computeStats();
-      }
-    };
     const onVisibility = () => {
-      if (document.visibilityState === "visible") computeStats();
+      if (document.visibilityState === "visible") void computeStats();
     };
-    if (typeof window !== "undefined") {
-      window.addEventListener("storage", onStorage);
-      document.addEventListener("visibilitychange", onVisibility);
-    }
-    return () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("storage", onStorage);
-        document.removeEventListener("visibilitychange", onVisibility);
-      }
-    };
+    // Defer setState out of effect body to avoid cascading renders warning
+    setTimeout(() => {
+      void computeStats();
+    }, 0);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
 
   const availableModules = useMemo(

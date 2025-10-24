@@ -7,11 +7,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { formatBs, parseBsInput } from "@/lib/currency";
 import { useAuth, getRoleLabel } from "@/lib/auth-context";
 import type { Client, Product, SalesOrder, SalesOrderPaymentMethod } from "@/lib/entities";
-import { SAMPLE_CLIENTS, SAMPLE_PRODUCTS, SALES_ORDER_PAYMENT_METHODS } from "@/lib/entities";
-import { CLIENTS_STORAGE_KEY, INVENTORY_STORAGE_KEY, SALES_ORDERS_STORAGE_KEY } from "@/lib/storage";
-import { getTicketsConfig, saveTicketsConfig } from "@/lib/settings";
+import { SALES_ORDER_PAYMENT_METHODS } from "@/lib/entities";
+import { DEFAULT_TICKETS_CONFIG, type TicketsConfig } from "@/lib/settings";
+import { listClients, listProducts, upsertClient, createOrder } from "@/lib/supabase-repo";
+import { getTicketsConfigRemote } from "@/lib/supabase-repo";
 import { useNotify } from "@/components/notifications/provider";
-import { uid } from "@/lib/id";
 
 const PAYMENT_METHODS = SALES_ORDER_PAYMENT_METHODS;
 
@@ -56,35 +56,7 @@ const filterProductsByTerm = (products: Product[], term: string) => {
   );
 };
 
-const getStoredClients = () => {
-  try {
-    const raw = window.localStorage.getItem(CLIENTS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Client[];
-      if (Array.isArray(parsed)) return parsed.map((c) => ({ ...c }));
-    }
-  } catch {}
-  const fallback = SAMPLE_CLIENTS.map((c) => ({ ...c }));
-  try {
-    window.localStorage.setItem(CLIENTS_STORAGE_KEY, JSON.stringify(fallback));
-  } catch {}
-  return fallback;
-};
-
-const getStoredProducts = () => {
-  try {
-    const raw = window.localStorage.getItem(INVENTORY_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Product[];
-      if (Array.isArray(parsed)) return parsed.map((p) => ({ ...p }));
-    }
-  } catch {}
-  const fallback = SAMPLE_PRODUCTS.map((p) => ({ ...p }));
-  try {
-    window.localStorage.setItem(INVENTORY_STORAGE_KEY, JSON.stringify(fallback));
-  } catch {}
-  return fallback;
-};
+// Cloud-only: clients and products se cargan desde Supabase
 
 const validateQuickClient = (form: QuickClientFormState) => {
   if (!form.name.trim() || !form.documentId.trim() || !form.address.trim()) {
@@ -95,24 +67,7 @@ const validateQuickClient = (form: QuickClientFormState) => {
   return null;
 };
 
-const loadStoredSalesOrders = () => {
-  try {
-    const raw = window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY);
-    if (!raw) return [] as SalesOrder[];
-    const parsed = JSON.parse(raw) as SalesOrder[];
-    if (Array.isArray(parsed)) {
-      return parsed.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i })) }));
-    }
-  } catch {}
-  return [] as SalesOrder[];
-};
-
-const persistSalesOrder = (order: SalesOrder) => {
-  try {
-    const current = loadStoredSalesOrders();
-    window.localStorage.setItem(SALES_ORDERS_STORAGE_KEY, JSON.stringify([order, ...current]));
-  } catch {}
-};
+// Cloud-only: el historial se almacena en Supabase (orders/order_items)
 
 const ticketDateFormatter = new Intl.DateTimeFormat("es-BO", {
   dateStyle: "medium",
@@ -145,7 +100,7 @@ const wrapText = (
 
 const downloadSaleTicket = async (order: SalesOrder, attendedByName?: string) => {
   try {
-    const cfg = getTicketsConfig();
+    const cfg = (await getTicketsConfigRemote<TicketsConfig>()) ?? DEFAULT_TICKETS_CONFIG;
     // Typography & styles
     const baseFontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
     const styles = {
@@ -440,14 +395,37 @@ export default function RegisterSalePage() {
       return;
     }
     if (hasLoadedData) return;
-    try {
-      const storedClients = getStoredClients();
-      const storedProducts = getStoredProducts();
-      setClients(storedClients);
-      setProducts(storedProducts);
-    } finally {
-      setHasLoadedData(true);
-    }
+    (async () => {
+      try {
+        const [remoteClients, remoteProducts] = await Promise.all([listClients(), listProducts()]);
+        setClients(
+          remoteClients.map((c) => ({
+            id: c.id,
+            name: c.name,
+            documentId: c.documentId,
+            phone: c.phone,
+            address: c.address,
+            createdAt: c.createdAt,
+          }))
+        );
+        setProducts(
+          remoteProducts.map((p) => ({
+            id: p.id,
+            name: p.name,
+            color: p.color,
+            stock: p.stock,
+            cost: p.cost,
+            salePrice: p.salePrice,
+            image: p.image,
+            createdAt: p.createdAt,
+          }))
+        );
+      } catch (err) {
+        console.error("Error cargando datos iniciales desde la nube", err);
+      } finally {
+        setHasLoadedData(true);
+      }
+    })();
   }, [hasLoadedData, isHydrated, router, user]);
 
   useEffect(() => {
@@ -518,38 +496,44 @@ export default function RegisterSalePage() {
     setCart((prev) => prev.filter((line) => line.product.id !== productId));
   };
 
-  const handleAddQuickClient = () => {
+  const handleAddQuickClient = async () => {
     const validation = validateQuickClient(quickClient);
     if (validation) {
       setQuickClientError(validation);
       return;
     }
-    const newClient: Client = {
-      id: uid(),
-      name: quickClient.name.trim(),
-      documentId: quickClient.documentId.trim(),
-      phone: quickClient.phone.trim(),
-      address: quickClient.address.trim(),
-      createdAt: new Date().toISOString(),
-    };
-    setClients((prev) => [newClient, ...prev]);
-    setSelectedClient(newClient);
-    setDeliveryAddress(newClient.address);
-    setQuickClient(INITIAL_QUICK_CLIENT);
-    setQuickClientError(null);
-    setShowQuickClient(false);
-    setFeedback(`Cliente "${newClient.name}" registrado y seleccionado.`);
     try {
-      notify({
-        title: "Cliente guardado",
-        message: `Se registró ${newClient.name} y quedó seleccionado para la venta.`,
-        variant: "success",
+      const saved = await upsertClient({
+        name: quickClient.name.trim(),
+        documentId: quickClient.documentId.trim(),
+        phone: quickClient.phone.trim(),
+        address: quickClient.address.trim(),
       });
-    } catch {}
-    try {
-      const current = getStoredClients();
-      window.localStorage.setItem(CLIENTS_STORAGE_KEY, JSON.stringify([newClient, ...current]));
-    } catch {}
+      const newClient: Client = {
+        id: saved.id,
+        name: saved.name,
+        documentId: saved.documentId,
+        phone: saved.phone,
+        address: saved.address,
+        createdAt: saved.createdAt,
+      };
+      setClients((prev) => [newClient, ...prev]);
+      setSelectedClient(newClient);
+      setDeliveryAddress(newClient.address);
+      setQuickClient(INITIAL_QUICK_CLIENT);
+      setQuickClientError(null);
+      setShowQuickClient(false);
+      setFeedback(`Cliente "${newClient.name}" registrado y seleccionado.`);
+      try {
+        notify({
+          title: "Cliente guardado",
+          message: `Se registró ${newClient.name} y quedó seleccionado para la venta.`,
+          variant: "success",
+        });
+      } catch {}
+    } catch (err) {
+      setQuickClientError("No se pudo guardar el cliente en la nube.");
+    }
   };
 
   const resetSale = () => {
@@ -583,17 +567,9 @@ export default function RegisterSalePage() {
 
     const normalizedAddress = deliveryAddress.trim() || "Retiro en tienda";
     const createdAt = new Date().toISOString();
-    const items = cart.map((line) => ({
-      productId: line.product.id,
-      productName: line.product.name,
-      color: line.product.color,
-      quantity: line.quantity,
-      unitPrice: line.product.salePrice,
-      lineTotal: line.product.salePrice * line.quantity,
-    }));
 
-    // 1) Releer inventario actual desde storage para validar stock a tiempo real
-    const currentInventory = getStoredProducts();
+    // 1) Releer inventario actual desde la nube para validar stock a tiempo real
+    const currentInventory = await listProducts();
     const problems: string[] = [];
     for (const line of cart) {
       const p = currentInventory.find((prod) => prod.id === line.product.id);
@@ -614,52 +590,80 @@ export default function RegisterSalePage() {
       return;
     }
 
-    // 2) Descontar del inventario y persistir
-    const updatedInventory = currentInventory.map((p) => {
-      const line = cart.find((l) => l.product.id === p.id);
-      return line ? { ...p, stock: Math.max(0, p.stock - line.quantity) } : p;
-    });
-    try {
-      window.localStorage.setItem(INVENTORY_STORAGE_KEY, JSON.stringify(updatedInventory));
-      setProducts(updatedInventory);
-    } catch {}
+    // 2) Registrar orden en la nube (createOrder se encarga de descontar stock si es 'sale')
 
-    // Usar correlativo desde configuración
-    let nextSequence = 1;
-    try {
-      const cfg = getTicketsConfig();
-      nextSequence = Math.max(1, Number(cfg.sale.nextNumber) || 1);
-      // incrementar y persistir
-      const updated = { ...cfg, sale: { ...cfg.sale, nextNumber: nextSequence + 1 } };
-      saveTicketsConfig(updated);
-    } catch {
-      const existing = loadStoredSalesOrders();
-      const maxSeq = existing.reduce((max, o) => Math.max(max, o.sequence ?? 0), 0);
-      nextSequence = maxSeq > 0 ? maxSeq + 1 : existing.length + 1;
-    }
-
-    const order: SalesOrder = {
-      id: uid(),
+    // Crear orden en Supabase
+    const created = await createOrder({
       kind: "sale",
-      performedByUsername: user.username,
-      performedByRole: user.role,
-      clientId: selectedClient.id,
-      clientName: selectedClient.name,
-      clientDocumentId: selectedClient.documentId,
-      clientPhone: selectedClient.phone,
-      deliveryAddress: normalizedAddress,
-      paymentMethod,
-      sequence: nextSequence,
+      total,
+      payment_method: paymentMethod,
+      performed_by_username: user.username,
+      performed_by_role: user.role,
+      client_id: selectedClient.id,
+      client_name: selectedClient.name,
+      client_document_id: selectedClient.documentId,
+      client_phone: selectedClient.phone,
+      delivery_address: normalizedAddress,
       subtotal,
       discount: discountAmount,
-      total,
       notes: notes.trim(),
-      createdAt,
-      items,
-    };
+      items: cart.map((line) => ({
+        product_id: line.product.id,
+        product_name: line.product.name,
+        color: line.product.color,
+        qty: line.quantity,
+        unit_price: line.product.salePrice,
+        subtotal: line.product.salePrice * line.quantity,
+      })),
+    });
 
-  // 3) Registrar la venta en historial (no afecta inventario aquí)
-  persistSalesOrder(order);
+    // Refrescar inventario localmente (opcional) para reflejar stock actualizado
+    try {
+      const refreshed = await listProducts();
+      setProducts(
+        refreshed.map((p) => ({
+          id: p.id,
+          name: p.name,
+          color: p.color,
+          stock: p.stock,
+          cost: p.cost,
+          salePrice: p.salePrice,
+          image: p.image,
+          createdAt: p.createdAt,
+        }))
+      );
+    } catch {}
+
+    // Mapear a SalesOrder (tipo UI) para el ticket
+    const order: SalesOrder = {
+      id: created.id,
+      kind: "sale",
+      performedByUsername: created.performed_by_username,
+      performedByRole:
+        created.performed_by_role === "admin" || created.performed_by_role === "operator"
+          ? created.performed_by_role
+          : user.role,
+      clientId: created.client_id || selectedClient.id,
+      clientName: created.client_name || selectedClient.name,
+      clientDocumentId: created.client_document_id || selectedClient.documentId,
+      clientPhone: created.client_phone || selectedClient.phone,
+      deliveryAddress: created.delivery_address || normalizedAddress,
+      paymentMethod: paymentMethod,
+      sequence: created.sequence,
+      subtotal: created.subtotal ?? subtotal,
+      discount: created.discount ?? discountAmount,
+      total: created.total,
+      notes: created.notes || notes.trim(),
+      createdAt: created.created_at || createdAt,
+      items: cart.map((line) => ({
+        productId: line.product.id,
+        productName: line.product.name,
+        color: line.product.color,
+        quantity: line.quantity,
+        unitPrice: line.product.salePrice,
+        lineTotal: line.product.salePrice * line.quantity,
+      })),
+    };
     const attendedBy = user ? `${user.username} - ${getRoleLabel(user.role)}` : undefined;
     const ticketGenerated = await downloadSaleTicket(order, attendedBy);
 
@@ -667,8 +671,8 @@ export default function RegisterSalePage() {
     resetSale();
     setFeedback(
       ticketGenerated
-        ? "Venta registrada, inventario actualizado y ticket descargado."
-        : "Venta registrada e inventario actualizado, pero no se pudo descargar el ticket automáticamente."
+        ? "Venta registrada en la nube, inventario actualizado y ticket descargado."
+        : "Venta registrada en la nube e inventario actualizado, pero no se pudo descargar el ticket automáticamente."
     );
     try {
       if (ticketGenerated) {

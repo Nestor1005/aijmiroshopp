@@ -18,13 +18,11 @@ import {
   Bar,
 } from "recharts";
 import { useAuth } from "@/lib/auth-context";
-import type { Client, Product, SalesOrder, SalesOrderPaymentMethod } from "@/lib/entities";
-import { SALES_ORDER_PAYMENT_METHODS, SAMPLE_CLIENTS, SAMPLE_PRODUCTS } from "@/lib/entities";
-import { CLIENTS_STORAGE_KEY, INVENTORY_STORAGE_KEY, SALES_ORDERS_STORAGE_KEY } from "@/lib/storage";
+import type { Product, SalesOrder, SalesOrderPaymentMethod } from "@/lib/entities";
+import { SALES_ORDER_PAYMENT_METHODS } from "@/lib/entities";
+import { listOrders, listProducts, getLowStockThreshold, setLowStockThreshold } from "@/lib/supabase-repo";
 import * as XLSX from "xlsx";
 import { useNotify } from "@/components/notifications/provider";
-
-const LOW_STOCK_THRESHOLD_STORAGE_KEY = "miroshop:low-stock-threshold";
 
 type PaymentMethod = SalesOrderPaymentMethod;
 
@@ -88,77 +86,41 @@ function applyQuickRange(quick: Filters["quick"], base?: DateRange): DateRange {
   return base ?? { from: "", to: "" };
 }
 
-function useLocalData() {
-  const readOrders = (): SalesOrder[] => {
-    try {
-      const raw = typeof window !== "undefined" ? window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY) : null;
-      const parsed = raw ? (JSON.parse(raw) as SalesOrder[]) : [];
-      return Array.isArray(parsed) ? parsed.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i })) })) : [];
-    } catch {
-      return [];
-    }
-  };
-  const readClients = (): Client[] => {
-    try {
-      const raw = typeof window !== "undefined" ? window.localStorage.getItem(CLIENTS_STORAGE_KEY) : null;
-      const parsed = raw ? (JSON.parse(raw) as Client[]) : SAMPLE_CLIENTS;
-      return Array.isArray(parsed) ? parsed.map((c) => ({ ...c })) : SAMPLE_CLIENTS.map((c) => ({ ...c }));
-    } catch {
-      return SAMPLE_CLIENTS.map((c) => ({ ...c }));
-    }
-  };
-  const readProducts = (): Product[] => {
-    try {
-      const raw = typeof window !== "undefined" ? window.localStorage.getItem(INVENTORY_STORAGE_KEY) : null;
-      const parsed = raw ? (JSON.parse(raw) as Product[]) : SAMPLE_PRODUCTS;
-      return Array.isArray(parsed) ? parsed.map((p) => ({ ...p })) : SAMPLE_PRODUCTS.map((p) => ({ ...p }));
-    } catch {
-      return SAMPLE_PRODUCTS.map((p) => ({ ...p }));
-    }
-  };
-
-  const [orders, setOrders] = useState<SalesOrder[]>(() => readOrders());
-  const [clients, setClients] = useState<Client[]>(() => readClients());
-  const [products, setProducts] = useState<Product[]>(() => readProducts());
-
-  const load = () => {
-    try {
-      const raw = window.localStorage.getItem(SALES_ORDERS_STORAGE_KEY);
-      const parsed = raw ? (JSON.parse(raw) as SalesOrder[]) : [];
-      setOrders(Array.isArray(parsed) ? parsed.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i })) })) : []);
-    } catch {
-      setOrders([]);
-    }
-    try {
-      const raw = window.localStorage.getItem(CLIENTS_STORAGE_KEY);
-      const parsed = raw ? (JSON.parse(raw) as Client[]) : SAMPLE_CLIENTS;
-      setClients(Array.isArray(parsed) ? parsed.map((c) => ({ ...c })) : SAMPLE_CLIENTS.map((c) => ({ ...c })));
-    } catch {
-      setClients(SAMPLE_CLIENTS.map((c) => ({ ...c })));
-    }
-    try {
-      const raw = window.localStorage.getItem(INVENTORY_STORAGE_KEY);
-      const parsed = raw ? (JSON.parse(raw) as Product[]) : SAMPLE_PRODUCTS;
-      setProducts(Array.isArray(parsed) ? parsed.map((p) => ({ ...p })) : SAMPLE_PRODUCTS.map((p) => ({ ...p })));
-    } catch {
-      setProducts(SAMPLE_PRODUCTS.map((p) => ({ ...p })));
-    }
-  };
-
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (
-        e.key === SALES_ORDERS_STORAGE_KEY ||
-        e.key === CLIENTS_STORAGE_KEY ||
-        e.key === INVENTORY_STORAGE_KEY
-      )
-        load();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  return { orders, clients, products, reload: load };
+// Cloud data loaders
+async function fetchOrders(): Promise<SalesOrder[]> {
+  const rows = await listOrders();
+  return rows.map((o) => {
+    const pmRaw = String(o.payment_method ?? "");
+    const pm: PaymentMethod = (PAYMENT_METHODS as readonly string[]).includes(pmRaw)
+      ? (pmRaw as PaymentMethod)
+      : "Otro";
+    return ({
+    id: o.id,
+    kind: o.kind,
+    performedByUsername: o.performed_by_username ?? "",
+    performedByRole: o.performed_by_role ?? undefined,
+    clientId: o.client_id ?? "",
+    clientName: o.client_name ?? "",
+    clientDocumentId: o.client_document_id ?? "",
+    clientPhone: o.client_phone ?? "",
+    deliveryAddress: o.delivery_address ?? "",
+    paymentMethod: pm,
+    sequence: o.sequence,
+    subtotal: Number(o.subtotal ?? 0),
+    discount: Number(o.discount ?? 0),
+    total: Number(o.total ?? 0),
+    notes: o.notes ?? "",
+    createdAt: o.created_at ?? new Date().toISOString(),
+    items: (o.items ?? []).map((it) => ({
+      productId: String(it.product_id ?? ""),
+      productName: String(it.product_name ?? ""),
+      color: String(it.color ?? ""),
+      quantity: Number(it.qty ?? 0),
+      unitPrice: Number(it.unit_price ?? 0),
+      lineTotal: Number(it.subtotal ?? 0),
+    })),
+    });
+  });
 }
 
 function dateInRange(iso: string, range: DateRange) {
@@ -178,7 +140,29 @@ function dateInRange(iso: string, range: DateRange) {
 
 export default function ReportsPage() {
   const { user, isHydrated } = useAuth();
-  const { orders, products, reload } = useLocalData();
+  const [orders, setOrders] = useState<SalesOrder[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const reload = async () => {
+    try {
+      const [o, p] = await Promise.all([fetchOrders(), listProducts()]);
+      setOrders(o);
+      setProducts(
+        p.map((prod) => ({
+          id: prod.id,
+          name: prod.name,
+          color: prod.color,
+          stock: prod.stock,
+          cost: prod.cost,
+          salePrice: prod.salePrice,
+          image: prod.image,
+          createdAt: prod.createdAt,
+        }))
+      );
+    } catch {
+      setOrders([]);
+      setProducts([]);
+    }
+  };
   const unauthorizedMessage = !isHydrated || !user ? "Validando permisos..." : user.role !== "admin" ? "Acceso solo para administradores." : null;
   const notify = useNotify();
 
@@ -202,30 +186,23 @@ export default function ReportsPage() {
   };
 
   // Umbral configurable de stock bajo
-  const [lowStockThreshold, setLowStockThreshold] = useState<number>(() => {
-    if (typeof window === "undefined") return 5;
-    const raw = window.localStorage.getItem(LOW_STOCK_THRESHOLD_STORAGE_KEY);
-    const n = raw ? Number(raw) : NaN;
-    return Number.isFinite(n) && n >= 0 ? n : 5;
-  });
+  const [lowStockThreshold, setLowStockThresholdState] = useState<number>(5);
 
-  // Sincroniza cambios entre pestañas
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === LOW_STOCK_THRESHOLD_STORAGE_KEY) {
-        const n = e.newValue ? Number(e.newValue) : NaN;
-        if (Number.isFinite(n) && n >= 0) setLowStockThreshold(n);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    (async () => {
+      await reload();
+      try {
+        const n = await getLowStockThreshold();
+        setLowStockThresholdState(n);
+      } catch {}
+    })();
   }, []);
 
-  const updateLowStockThreshold = (n: number) => {
+  const updateLowStockThreshold = async (n: number) => {
     const val = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
-    setLowStockThreshold(val);
+    setLowStockThresholdState(val);
     try {
-      window.localStorage.setItem(LOW_STOCK_THRESHOLD_STORAGE_KEY, String(val));
+      await setLowStockThreshold(val);
     } catch {}
   };
 
